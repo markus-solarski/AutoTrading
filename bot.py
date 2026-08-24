@@ -21,8 +21,8 @@ PRIMARY_EXCHANGE = "ARCA"
 
 # Strategie-Parameter
 DISCOUNT = 0.096              # 9,6 % Abstand zum aktuellen Kurs
-MIN_DAYS = 25                 # Laufzeit 25 bis 38 Tage
-MAX_DAYS = 38
+MIN_DAYS = 30                 # Laufzeit 30 bis 41 Tage
+MAX_DAYS = 41
 
 
 def already_traded_this_month():
