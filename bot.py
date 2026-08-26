@@ -2,6 +2,7 @@ import math
 import os
 import datetime
 import sys
+import random
 # WORKAROUND: Zeitzonen-Absicherung
 try:
     import zoneinfo
@@ -20,7 +21,7 @@ EXCHANGE = "SMART"
 PRIMARY_EXCHANGE = "ARCA"
 
 # Strategie-Parameter
-DISCOUNT = 0.096              # 9,6 % Abstand zum aktuellen Kurs
+DISCOUNT = 0.093              # 9,3 % Abstand zum aktuellen Kurs
 MIN_DAYS = 30                 # Laufzeit 30 bis 41 Tage
 MAX_DAYS = 41
 
@@ -91,8 +92,25 @@ def run_bot():
             return
 
         # 2. Verbindung herstellen (Standard TWS: 7496/7497, Gateway: 4001/4002)
-        ib.connect('127.0.0.1', 4002, clientId=99, timeout=20)
-        print("[INFO] Erfolgreich mit IB Gateway verbunden.")
+        # DAUERHAFTE LOESUNG: Zufaellige clientId statt fest 99, damit blockierte/
+        # haengende alte Sessions eine neue Verbindung nicht mehr verhindern koennen.
+        client_id = random.randint(1000, 9999)
+        connected = False
+        for attempt in range(1, 4):
+            try:
+                ib.connect('127.0.0.1', 4002, clientId=client_id, timeout=20)
+                connected = True
+                break
+            except Exception as conn_err:
+                print(f"[WARNUNG] Verbindungsversuch {attempt} mit clientId {client_id} fehlgeschlagen: {conn_err}")
+                client_id = random.randint(1000, 9999)
+                ib.sleep(2)
+
+        if not connected:
+            print("[FEHLER] Verbindung zum IB Gateway konnte nach mehreren Versuchen nicht aufgebaut werden.")
+            return
+
+        print(f"[INFO] Erfolgreich mit IB Gateway verbunden (clientId={client_id}).")
 
         # Verzögerte Marktdaten explizit anfordern
         ib.reqMarketDataType(3)
@@ -206,7 +224,14 @@ def run_bot():
             print("⚠️ ACHTUNG: Der Preis basiert auf historischen Daten. Limit manuell prüfen!")
 
         # 8. Bestätigung abfragen
-        user_input = input("\nSoll der Short Put zu diesem Mid-Preis platziert werden? (j/n): ").strip()
+        auto_confirm = os.getenv("AUTO_CONFIRM", "false").lower() == "true"
+
+        if sys.stdin.isatty() and not auto_confirm:
+            user_input = input("\nSoll der Short Put zu diesem Mid-Preis platziert werden? (j/n): ").strip()
+        else:
+            user_input = "j" if auto_confirm else "n"
+            print(f"\n[AUTO] Keine interaktive Eingabe möglich. Automatische Antwort: '{user_input}'")
+
         if user_input.lower() == 'j':
             order = LimitOrder('SELL', 1, target_price)
             trade = ib.placeOrder(put_option, order)
