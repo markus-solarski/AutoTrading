@@ -24,6 +24,13 @@ DISCOUNT = 0.093
 MIN_DAYS = 30
 MAX_DAYS = 41
 
+# Hinweis: IB Gateway liefert ueber reqExecutions() ausschliesslich Ausfuehrungen
+# des aktuellen Handelstages - eine 3-Monats-Rueckschau ist darueber technisch
+# nicht moeglich (feste API-Beschraenkung, keine Frage der Konfiguration).
+# Stattdessen wird ib.positions() genutzt: das zeigt den tatsaechlichen, aktuellen
+# Kontostand direkt vom Broker, unabhaengig davon, wann eine Position eroeffnet
+# wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
+
 
 def already_traded_this_month():
     if not os.path.exists(LOG_FILE):
@@ -46,39 +53,88 @@ def already_traded_this_month():
     return False
 
 
+def count_recent_log_fills(symbol, days_back=90):
+    """
+    Zusaetzliche Referenz-Zaehlung ausschliesslich aus dem lokalen Bot-Log
+    (trades_log.txt), da IBKR selbst keine 90-Tage-Execution-Abfrage erlaubt.
+    Zaehlt alle Log-Eintraege mit "Order platziert" fuer das Symbol, deren
+    Datum innerhalb der letzten 'days_back' Tage liegt. Dient nur zu
+    Informationszwecken, nicht zur Limit-Pruefung.
+    """
+    if not os.path.exists(LOG_FILE):
+        return 0
+
+    cutoff_date = datetime.date.today() - datetime.timedelta(days=days_back)
+    count = 0
+    with open(LOG_FILE, "r") as f:
+        for line in f:
+            if line.startswith("[") and "Order platziert" in line and symbol in line:
+                try:
+                    log_date_str = line[1:11]  # "YYYY-MM-DD"
+                    log_date = datetime.datetime.strptime(log_date_str, "%Y-%m-%d").date()
+                    if log_date >= cutoff_date:
+                        count += 1
+                except ValueError:
+                    continue
+    return count
+
+
 def sync_open_orders(ib):
     ib.reqAllOpenOrders()
     ib.sleep(2)
 
 
 def count_active_trades(ib, symbol):
+    """
+    Definition:
+    - "Orders aufgegeben": Orders mit Status 'Submitted' (noch nicht ausgefuehrt).
+    - "Aktive Trades": tatsaechlich bestehende, offene Positionen (Status Filled,
+      noch nicht geschlossen/abgelaufen) - ermittelt ueber ib.positions(), da dies
+      unabhaengig vom Alter der Position immer den aktuellen, korrekten Stand zeigt.
+    """
     sync_open_orders(ib)
 
+    # --- Orders aufgegeben (Status = Submitted) ---
     open_trades = ib.openTrades()
-    matching_trades = []
+    orders_aufgegeben_list = []
     for t in open_trades:
-        if t.contract.symbol == symbol and t.orderStatus.status not in ('Filled', 'Cancelled', 'ApiCancelled'):
-            matching_trades.append(t)
-    open_orders_count = len(matching_trades)
+        if t.contract.symbol == symbol and t.orderStatus.status == 'Submitted':
+            orders_aufgegeben_list.append(t)
+    orders_aufgegeben_count = len(orders_aufgegeben_list)
 
+    # --- Aktive Trades (tatsaechlich offene Positionen, unabhaengig vom Alter) ---
     positions = ib.positions()
-    open_positions_count = 0
+    aktive_trades_list = []
     for p in positions:
         if p.contract.symbol == symbol and p.position != 0:
-            open_positions_count += 1
+            aktive_trades_list.append(p)
+    aktive_trades_count = len(aktive_trades_list)
 
-    total_active = open_orders_count + open_positions_count
+    total_active = orders_aufgegeben_count + aktive_trades_count
 
-    print("[DEBUG] Gefundene offene Orders fuer " + symbol + ":")
-    if matching_trades:
-        for t in matching_trades:
+    # Referenzwert: wie viele Orders wurden laut lokalem Log in den letzten 90 Tagen platziert
+    recent_log_fills = count_recent_log_fills(symbol, days_back=90)
+
+    print("[DEBUG] Orders aufgegeben (Status Submitted) fuer " + symbol + ":")
+    if orders_aufgegeben_list:
+        for t in orders_aufgegeben_list:
             strike = getattr(t.contract, 'strike', '-')
             right = getattr(t.contract, 'right', '')
             print("        OrderId " + str(t.order.orderId) + " | clientId " + str(t.order.clientId) + " | Status: " + t.orderStatus.status + " | " + str(strike) + str(right))
     else:
         print("        (keine)")
 
-    print("[INFO] Aktive Orders: " + str(open_orders_count) + " | Offene Positionen: " + str(open_positions_count) + " | Gesamt aktiv: " + str(total_active) + "/" + str(MAX_CONCURRENT_TRADES))
+    print("[DEBUG] Aktive Trades (offene Positionen) fuer " + symbol + ":")
+    if aktive_trades_list:
+        for p in aktive_trades_list:
+            strike = getattr(p.contract, 'strike', '-')
+            right = getattr(p.contract, 'right', '')
+            print("        Position: " + str(p.position) + " | " + str(strike) + str(right) + " | AvgCost: " + format(p.avgCost, '.2f'))
+    else:
+        print("        (keine)")
+
+    print("[INFO] Orders aufgegeben: " + str(orders_aufgegeben_count) + " | Aktive Trades: " + str(aktive_trades_count) + " | Gesamt aktiv: " + str(total_active) + "/" + str(MAX_CONCURRENT_TRADES))
+    print("[INFO] Referenz aus lokalem Log: " + str(recent_log_fills) + " Order(s) in den letzten 90 Tagen platziert (nur informativ, kein Limit-Check).")
     return total_active
 
 
