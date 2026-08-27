@@ -39,9 +39,8 @@ def already_traded_this_month():
     trades_this_month_count = 0
     with open(LOG_FILE, "r") as f:
         for line in f:
-            # Erwartetes Format: [YYYY-MM-DD HH:MM:SS] ... Order platziert ...
             if line.startswith("[") and "Order platziert" in line:
-                log_month_str = line[1:8]  # extrahiert "YYYY-MM" aus "[YYYY-MM-DD ..."
+                log_month_str = line[1:8]
                 if log_month_str == current_month_str:
                     trades_this_month_count += 1
 
@@ -53,17 +52,36 @@ def already_traded_this_month():
     return False
 
 
+def sync_open_orders(ib):
+    """
+    Erzwingt einen vollstaendigen Sync ALLER offenen Orders ueber alle
+    Client-IDs hinweg. Notwendig, weil der Bot bei jedem Lauf mit einer
+    zufaelligen clientId verbindet - ohne diesen expliziten Call sieht
+    ib.openTrades() unter Umstaenden nur die Orders der aktuellen Session
+    und nicht die aus frueheren Laeufen mit anderer clientId.
+
+    Wichtig: In IB Gateway muss unter Configure -> API -> Settings die
+    Option "Download open orders on connection" aktiviert sein, damit
+    dieser Sync zuverlaessig alle Orders liefert.
+    """
+    ib.reqAllOpenOrders()
+    ib.sleep(2)  # Zeit fuer eingehende openOrder/orderStatus-Callbacks
+
+
 def count_active_trades(ib, symbol):
     """
     Zaehlt alle aktuell 'laufenden' Trades fuer das gegebene Symbol:
     - offene/unausgefuehrte Orders (noch nicht gefuellt/storniert)
     - bestehende Positionen (bereits ausgefuehrte, noch offene Trades)
     """
+    sync_open_orders(ib)
+
     open_trades = ib.openTrades()
-    open_orders_count = sum(
-        1 for t in open_trades
+    matching_trades = [
+        t for t in open_trades
         if t.contract.symbol == symbol and t.orderStatus.status not in ('Filled', 'Cancelled', 'ApiCancelled')
-    )
+    ]
+    open_orders_count = len(matching_trades)
 
     positions = ib.positions()
     open_positions_count = sum(
@@ -72,6 +90,15 @@ def count_active_trades(ib, symbol):
     )
 
     total_active = open_orders_count + open_positions_count
+
+    # Diagnose-Ausgabe: zeigt genau, welche Orders erkannt wurden
+    print(f"[DEBUG] Gefundene offene Orders fuer {symbol}:")
+    if matching_trades:
+        for t in matching_trades:
+            print(f"        OrderId {t.order.orderId} | clientId {t.order.clientId} | Status: {t.orderStatus.status} | Strike/Right: {getattr(t.contract, 'strike', '-')}{getattr(t.contract, 'right', '')}")
+    else:
+        print("        (keine)")
+
     print(f"[INFO] Aktive Orders: {open_orders_count} | Offene Positionen: {open_positions_count} | Gesamt aktiv: {total_active}/{MAX_CONCURRENT_TRADES}")
     return total_active
 
@@ -92,8 +119,8 @@ def run_bot():
             return
 
         # 2. Verbindung herstellen (Standard TWS: 7496/7497, Gateway: 4001/4002)
-        # DAUERHAFTE LOESUNG: Zufaellige clientId statt fest 99, damit blockierte/
-        # haengende alte Sessions eine neue Verbindung nicht mehr verhindern koennen.
+        # Zufaellige clientId, damit blockierte/haengende alte Sessions eine
+        # neue Verbindung nicht mehr verhindern koennen.
         client_id = random.randint(1000, 9999)
         connected = False
         for attempt in range(1, 4):
@@ -147,7 +174,6 @@ def run_bot():
             print("[FEHLER] Keine Optionsdaten gefunden.")
             return
 
-        # Suchen nach der SMART-Kette mit den meisten Laufzeiten/Strikes
         smart_chains = [c for c in chains if c.exchange == 'SMART']
         chain = smart_chains[0] if smart_chains else chains[0]
 
@@ -162,14 +188,12 @@ def run_bot():
             print(f"[FEHLER] Keine Option im Zeitfenster ({MIN_DAYS}-{MAX_DAYS} Tage) gefunden.")
             return
 
-        # Strike-Auswahl: Explizites Typecasting auf Float zur Vermeidung von Vergleichsfehlern
         valid_strikes = [float(s) for s in chain.strikes if float(s) <= calculated_target]
         if not valid_strikes:
             print("[FEHLER] Kein passender Strike unterhalb des Ziel-Preises vorhanden.")
             return
         target_strike = max(valid_strikes)
 
-        # Optionskontrakt qualifizieren
         put_option = Option(SYMBOL, expiry, target_strike, 'P', 'SMART', currency=CURRENCY)
         qualified = ib.qualifyContracts(put_option)
         if not qualified:
@@ -180,7 +204,6 @@ def run_bot():
         print("[INFO] Frage verzögerte Marktdaten ab...")
         ticker = ib.reqMktData(put_option, '', False, False)
 
-        # Erhöht auf 10 Sekunden für verzögerte Datenfeeds über das Gateway
         for _ in range(10):
             ib.sleep(1)
             if ticker.bid > 0 or ticker.ask > 0:
@@ -189,7 +212,6 @@ def run_bot():
         bid = ticker.bid
         ask = ticker.ask
 
-        # Mid-Preis Ermittlung mit striktem Validierungs-Fallback
         is_fallback_used = False
         if bid > 0 and ask > 0:
             target_price = round((bid + ask) / 2, 2)
@@ -200,11 +222,9 @@ def run_bot():
             target_price = ticker.last
             is_fallback_used = True
         else:
-            # Kritischer Abbruch statt blindem 0.10 USD default Trade
             print("[FEHLER] Keine validen Preisdaten (Bid/Ask/Close) empfangen. Order-Platzierung abgebrochen.")
             return
 
-        # 7. Sauber strukturierte Zusammenfassung anzeigen
         print("\n--- ZUSAMMENFASSUNG ---")
         print(f"ETF: iShares MSCI Emerging Markets ({SYMBOL}) | Letzter Kurs: {last_close:.2f} USD")
         print(f"Berechneter Zielpreis (-9.6%): {calculated_target:.2f} USD")
@@ -219,7 +239,6 @@ def run_bot():
 
         print(f"-> Berechnete Ziel-Prämie (Limit): {target_price:.2f} USD")
 
-        # Zusätzliche Sicherheitsabfrage bei Fallback-Preisen
         if is_fallback_used:
             print("⚠️ ACHTUNG: Der Preis basiert auf historischen Daten. Limit manuell prüfen!")
 
@@ -236,7 +255,6 @@ def run_bot():
             order = LimitOrder('SELL', 1, target_price)
             trade = ib.placeOrder(put_option, order)
 
-            # Warten auf Status-Update der API
             ib.sleep(2)
             print(f"\n[OK] Status: {trade.orderStatus.status}")
             log_trade(f"Order platziert: {SYMBOL} Strike {target_strike} Expiry {expiry} Limit {target_price:.2f} USD | Status: {trade.orderStatus.status}")
