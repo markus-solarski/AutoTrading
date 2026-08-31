@@ -24,12 +24,27 @@ DISCOUNT = 0.093
 MIN_DAYS = 30
 MAX_DAYS = 41
 
+TAKE_PROFIT_FRACTION = 0.5          # 50% der erhaltenen Praemie
+CLOSE_ORDER_WAIT_SECONDS = 20       # wie lange nach Order-Platzierung auf Fill gewartet wird
+MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden, falls ein Strike ungueltig ist
+
 # Hinweis: IB Gateway liefert ueber reqExecutions() ausschliesslich Ausfuehrungen
 # des aktuellen Handelstages - eine 3-Monats-Rueckschau ist darueber technisch
 # nicht moeglich (feste API-Beschraenkung, keine Frage der Konfiguration).
 # Stattdessen wird ib.positions() genutzt: das zeigt den tatsaechlichen, aktuellen
 # Kontostand direkt vom Broker, unabhaengig davon, wann eine Position eroeffnet
 # wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
+
+
+def log_ib_error(reqId, errorCode, errorString, contract):
+    """
+    Protokolliert die vollen IB-Fehlermeldungen (z.B. 'No security definition has
+    been found'), damit man bei Abbruechen genau sieht, WELCHER Kontrakt / Request
+    das Problem verursacht hat, statt nur den generischen Skript-Abbruch zu sehen.
+    """
+    if errorCode in (200, 321, 322, 354, 10225):
+        print("[IB-FEHLER] Code " + str(errorCode) + ": " + errorString
+              + (" | Kontrakt: " + str(contract) if contract else ""))
 
 
 def already_traded_this_month():
@@ -144,8 +159,125 @@ def log_trade(details):
         f.write("[" + now_str + "] " + details + "\n")
 
 
+def has_open_closing_order(ib, contract):
+    """
+    Prueft, ob fuer diesen Options-Kontrakt bereits eine offene BUY-Order
+    (Rueckkauf / Take-Profit) existiert, um Doppel-Platzierungen zu vermeiden.
+    """
+    sync_open_orders(ib)
+    for t in ib.openTrades():
+        if (t.contract.conId == contract.conId
+                and t.order.action == 'BUY'
+                and t.orderStatus.status in ('PreSubmitted', 'Submitted', 'PendingSubmit', 'ApiPending')):
+            return True
+    return False
+
+
+def place_closing_order(ib, contract, premium_per_share, quantity):
+    """
+    Platziert die Long-Put-Rueckkauf-Order (BUY, GoodTillCancel) zum
+    halben Praemienpreis des urspruenglichen Short Puts.
+    """
+    take_profit_price = round(premium_per_share * TAKE_PROFIT_FRACTION, 2)
+
+    closing_order = LimitOrder('BUY', quantity, take_profit_price)
+    closing_order.tif = 'GTC'
+
+    closing_trade = ib.placeOrder(contract, closing_order)
+    ib.sleep(2)
+
+    print("[OK] Take-Profit-Rueckkauf-Order (GTC) platziert: " + contract.localSymbol
+          + " | Limit " + format(take_profit_price, '.2f') + " USD"
+          + " | Status: " + closing_trade.orderStatus.status)
+
+    log_trade("Closing Order (Take-Profit GTC) platziert: " + contract.localSymbol
+               + " Limit " + format(take_profit_price, '.2f') + " USD"
+               + " (50% von Praemie " + format(premium_per_share, '.2f') + " USD)"
+               + " | Status: " + closing_trade.orderStatus.status)
+
+    return closing_trade
+
+
+def ensure_closing_orders_for_open_positions(ib, symbol):
+    """
+    Laeuft bei jedem Bot-Start: sucht bestehende offene Short-Put-Positionen
+    fuer 'symbol', fuer die noch KEINE Rueckkauf-Order (Take-Profit, GTC)
+    existiert, und legt diese nach - basierend auf dem tatsaechlichen
+    durchschnittlichen Ausfuehrungspreis (avgCost) der Position.
+    Das fängt auch Faelle ab, in denen die Short-Put-Order erst NACH dem
+    vorherigen Skript-Lauf gefuellt wurde.
+    """
+    positions = ib.positions()
+    for p in positions:
+        if p.contract.symbol != symbol:
+            continue
+        if p.position >= 0:
+            continue  # nur Short-Positionen (negative Stueckzahl) betreffen uns
+
+        contract = p.contract
+        ib.qualifyContracts(contract)
+
+        if has_open_closing_order(ib, contract):
+            print("[INFO] Rueckkauf-Order fuer " + contract.localSymbol + " existiert bereits - keine neue Order.")
+            continue
+
+        multiplier = float(getattr(contract, 'multiplier', '100') or '100')
+        premium_per_share = abs(p.avgCost) / multiplier
+        quantity = abs(p.position)
+
+        print("[INFO] Offene Short-Put-Position ohne Rueckkauf-Order gefunden: " + contract.localSymbol
+              + " | Praemie (avgCost-basiert): " + format(premium_per_share, '.2f') + " USD")
+
+        place_closing_order(ib, contract, premium_per_share, quantity)
+
+
+def find_valid_put_contract(ib, symbol, currency, chain, calculated_target, min_exp, max_exp):
+    """
+    reqSecDefOptParams liefert eine AGGREGIERTE Liste aller Strikes/Expiries ueber
+    alle Boersenplaetze - nicht jede Kombination ist tatsaechlich als Kontrakt
+    gelistet. Statt blind die erste Kombination zu qualifizieren (was bei einer
+    ungueltigen Kombination zu "No security definition has been found" fuehrt),
+    wird hier mit reqContractDetails() ueber mehrere Strikes/Expiries geprueft,
+    bis ein tatsaechlich existierender Kontrakt gefunden wird.
+    """
+    candidate_expiries = []
+    for exp_str in sorted(chain.expirations):
+        exp_date = datetime.datetime.strptime(exp_str, '%Y%m%d').date()
+        if min_exp <= exp_date <= max_exp:
+            candidate_expiries.append(exp_str)
+
+    if not candidate_expiries:
+        print("[FEHLER] Keine Option im Zeitfenster gefunden.")
+        return None, None, None
+
+    candidate_strikes = sorted(
+        [float(s) for s in chain.strikes if float(s) <= calculated_target],
+        reverse=True
+    )[:MAX_STRIKE_FALLBACKS]
+
+    if not candidate_strikes:
+        print("[FEHLER] Kein passender Strike unterhalb des Ziel-Preises vorhanden.")
+        return None, None, None
+
+    for expiry in candidate_expiries:
+        for strike in candidate_strikes:
+            probe = Option(symbol, expiry, strike, 'P', 'SMART', currency=currency)
+            details = ib.reqContractDetails(probe)
+            if details:
+                qualified_contract = details[0].contract
+                print("[INFO] Gueltiger Kontrakt gefunden: Strike " + str(strike) + " | Expiry " + expiry)
+                return qualified_contract, expiry, strike
+            else:
+                print("[DEBUG] Kombination ungueltig (kein Kontrakt bei IB gelistet): Strike "
+                      + str(strike) + " | Expiry " + expiry)
+
+    print("[FEHLER] Keine gueltige Strike/Expiry-Kombination im Zeitfenster gefunden.")
+    return None, None, None
+
+
 def run_bot():
     ib = IB()
+    ib.errorEvent += log_ib_error
     try:
         print("=== SHORT PUT BOT: EMERGING MARKETS ETF (" + SYMBOL + ") ===")
 
@@ -175,6 +307,11 @@ def run_bot():
         stock = Stock(SYMBOL, EXCHANGE, CURRENCY, primaryExchange=PRIMARY_EXCHANGE)
         ib.qualifyContracts(stock)
 
+        # Zuerst pruefen, ob bereits gefuellte Short Puts noch eine
+        # Rueckkauf-Order (Take-Profit, GTC) brauchen - unabhaengig vom
+        # Monats-/Concurrent-Limit fuer NEUE Orders.
+        ensure_closing_orders_for_open_positions(ib, SYMBOL)
+
         active_count = count_active_trades(ib, SYMBOL)
         if active_count >= MAX_CONCURRENT_TRADES:
             print("[SICHERHEITSHINWEIS] Limit von " + str(MAX_CONCURRENT_TRADES) + " gleichzeitig laufenden Trades erreicht (" + str(active_count) + "/" + str(MAX_CONCURRENT_TRADES) + "). Keine neue Order.")
@@ -203,27 +340,10 @@ def run_bot():
         smart_chains = [c for c in chains if c.exchange == 'SMART']
         chain = smart_chains[0] if smart_chains else chains[0]
 
-        expiry = None
-        for exp_str in sorted(list(chain.expirations)):
-            exp_date = datetime.datetime.strptime(exp_str, '%Y%m%d').date()
-            if min_exp <= exp_date <= max_exp:
-                expiry = exp_str
-                break
-
-        if not expiry:
-            print("[FEHLER] Keine Option im Zeitfenster gefunden.")
-            return
-
-        valid_strikes = [float(s) for s in chain.strikes if float(s) <= calculated_target]
-        if not valid_strikes:
-            print("[FEHLER] Kein passender Strike unterhalb des Ziel-Preises vorhanden.")
-            return
-        target_strike = max(valid_strikes)
-
-        put_option = Option(SYMBOL, expiry, target_strike, 'P', 'SMART', currency=CURRENCY)
-        qualified = ib.qualifyContracts(put_option)
-        if not qualified:
-            print("[FEHLER] Kontrakt konnte nicht qualifiziert werden.")
+        put_option, expiry, target_strike = find_valid_put_contract(
+            ib, SYMBOL, CURRENCY, chain, calculated_target, min_exp, max_exp
+        )
+        if put_option is None:
             return
 
         print("[INFO] Frage verzoegerte Marktdaten ab...")
@@ -283,6 +403,24 @@ def run_bot():
             ib.sleep(2)
             print("[OK] Status: " + trade.orderStatus.status)
             log_trade("Order platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + expiry + " Limit " + format(target_price, '.2f') + " USD | Status: " + trade.orderStatus.status)
+
+            # Kurz warten, ob die Short-Put-Order noch im selben Lauf gefuellt wird.
+            # Falls ja: sofort die Take-Profit-Rueckkauf-Order (50% Praemie, GTC) platzieren.
+            # Falls nein: das erledigt ensure_closing_orders_for_open_positions() beim
+            # naechsten Bot-Start automatisch, sobald der Fill vorliegt.
+            waited = 0
+            while waited < CLOSE_ORDER_WAIT_SECONDS and trade.orderStatus.status != 'Filled':
+                ib.sleep(2)
+                waited += 2
+
+            if trade.orderStatus.status == 'Filled':
+                filled_qty = abs(trade.orderStatus.filled) or 1
+                fill_price = trade.orderStatus.avgFillPrice
+                print("[INFO] Short Put wurde im selben Lauf gefuellt @ " + format(fill_price, '.2f') + " USD.")
+                place_closing_order(ib, put_option, fill_price, filled_qty)
+            else:
+                print("[INFO] Short Put noch nicht gefuellt (Status: " + trade.orderStatus.status + "). "
+                      "Die Rueckkauf-Order wird beim naechsten Bot-Lauf automatisch nachgetragen, sobald ein Fill vorliegt.")
         else:
             print("[ABBRUCH] Es wurde keine Order platziert.")
 
