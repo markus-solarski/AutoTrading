@@ -8,6 +8,7 @@ try:
     import zoneinfo
 except ImportError:
     from backports import zoneinfo
+    from backports import zoneinfo
 
 os.environ['TZ'] = 'Europe/Berlin'
 from ib_insync import IB, Stock, Option, LimitOrder
@@ -28,7 +29,7 @@ MAX_DAYS = 41
 TAKE_PROFIT_FRACTION = 0.5          # 50% der erhaltenen Praemie
 CLOSE_ORDER_WAIT_SECONDS = 20       # wie lange nach Order-Platzierung auf Fill gewartet wird
 MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden, falls ein Strike ungueltig ist
-MIN_VALID_BID_PRICE = 0.03          # Bid-Preise UNTER diesem Wert (z.B. 0.01 / 0.02 USD) gelten als zu illiquide
+MIN_VALID_BID_PRICE = 0.06          # Bid-Preise UNTER diesem Wert gelten als zu niedrig/illiquide
 
 # Hinweis: IB Gateway liefert ueber reqExecutions() ausschliesslich Ausfuehrungen
 # des aktuellen Handelstages - eine 3-Monats-Rueckschau ist darueber technisch
