@@ -12,9 +12,10 @@ except ImportError:
 os.environ['TZ'] = 'Europe/Berlin'
 from ib_insync import IB, Stock, Option, LimitOrder
 
-MAX_ORDERS_PER_MONTH = 10
-MAX_CONCURRENT_TRADES = 3
+MAX_ORDERS_PER_MONTH = 19
+MAX_CONCURRENT_TRADES = 5
 LOG_FILE = "trades_log.txt"
+CRON_LOG_FILE = "cron.log"
 SYMBOL = "EEM"
 CURRENCY = "USD"
 EXCHANGE = "SMART"
@@ -34,6 +35,18 @@ MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden,
 # Stattdessen wird ib.positions() genutzt: das zeigt den tatsaechlichen, aktuellen
 # Kontostand direkt vom Broker, unabhaengig davon, wann eine Position eroeffnet
 # wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
+
+
+def log_cron_run():
+    """
+    Schreibt bei JEDEM Skriptstart sofort einen Zeitstempel in cron.log -
+    unabhaengig davon, ob spaeter eine Order platziert wird oder ein Fehler
+    auftritt. Getrennt von trades_log.txt, das nur tatsaechliche Order-/
+    Rueckkauf-Ereignisse protokolliert.
+    """
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(CRON_LOG_FILE, "a") as f:
+        f.write("[" + now_str + "] Bot-Lauf gestartet\n")
 
 
 def log_ib_error(reqId, errorCode, errorString, contract):
@@ -296,6 +309,8 @@ def find_valid_put_contract(ib, symbol, currency, chain, calculated_target, min_
 
 
 def run_bot():
+    log_cron_run()
+
     ib = IB()
     ib.errorEvent += log_ib_error
     try:
@@ -408,9 +423,9 @@ def run_bot():
         if is_fallback_used:
             print("ACHTUNG: Der Preis basiert auf historischen Daten. Limit manuell pruefen!")
 
-        auto_confirm = os.getenv("AUTO_CONFIRM", "false").lower() == "true"
+        auto_confirm = os.getenv("AUTO_CONFIRM", "true").lower() == "true"
 
-        if sys.stdin.isatty() and not auto_confirm:
+        if sys.stdin.isatty():
             user_input = input("\nSoll der Short Put zu diesem Mid-Preis platziert werden? (j/n): ").strip()
         else:
             user_input = "j" if auto_confirm else "n"
