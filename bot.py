@@ -28,6 +28,7 @@ MAX_DAYS = 41
 TAKE_PROFIT_FRACTION = 0.5          # 50% der erhaltenen Praemie
 CLOSE_ORDER_WAIT_SECONDS = 20       # wie lange nach Order-Platzierung auf Fill gewartet wird
 MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden, falls ein Strike ungueltig ist
+MIN_VALID_BID_PRICE = 0.03          # Bid-Preise UNTER diesem Wert (z.B. 0.01 / 0.02 USD) gelten als zu illiquide
 
 # Hinweis: IB Gateway liefert ueber reqExecutions() ausschliesslich Ausfuehrungen
 # des aktuellen Handelstages - eine 3-Monats-Rueckschau ist darueber technisch
@@ -37,16 +38,21 @@ MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden,
 # wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
 
 
-def log_cron_run():
+def log_cron_event(details):
     """
-    Schreibt bei JEDEM Skriptstart sofort einen Zeitstempel in cron.log -
-    unabhaengig davon, ob spaeter eine Order platziert wird oder ein Fehler
-    auftritt. Getrennt von trades_log.txt, das nur tatsaechliche Order-/
-    Rueckkauf-Ereignisse protokolliert.
+    Schreibt eine Zeile mit Zeitstempel in cron.log. Wird sowohl beim reinen
+    Skriptstart (log_cron_run) als auch bei bestimmten Abbruch-Ereignissen
+    (z.B. zu niedriger Bid-Preis) genutzt, damit im Cron-Log nachvollziehbar
+    ist, WARUM ein Lauf keine Order platziert hat.
     """
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(CRON_LOG_FILE, "a") as f:
-        f.write("[" + now_str + "] Bot-Lauf gestartet\n")
+        f.write("[" + now_str + "] " + details + "\n")
+
+
+def log_cron_run():
+    """Schreibt bei JEDEM Skriptstart sofort einen Eintrag in cron.log."""
+    log_cron_event("Bot-Lauf gestartet")
 
 
 def log_ib_error(reqId, errorCode, errorString, contract):
@@ -391,6 +397,12 @@ def run_bot():
 
         bid = ticker.bid
         ask = ticker.ask
+
+        if 0 < bid < MIN_VALID_BID_PRICE:
+            print("[SICHERHEITSHINWEIS] Bid-Preis von " + format(bid, '.2f') + " USD ist zu niedrig (< " + format(MIN_VALID_BID_PRICE, '.2f') + " USD) - Order wird nicht platziert.")
+            log_cron_event("Order NICHT platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + expiry
+                            + " - Bid-Preis zu niedrig: " + format(bid, '.2f') + " USD (< " + format(MIN_VALID_BID_PRICE, '.2f') + " USD)")
+            return
 
         is_fallback_used = False
         if bid > 0 and ask > 0:
