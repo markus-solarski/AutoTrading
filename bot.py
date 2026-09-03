@@ -8,7 +8,6 @@ try:
     import zoneinfo
 except ImportError:
     from backports import zoneinfo
-    from backports import zoneinfo
 
 os.environ['TZ'] = 'Europe/Berlin'
 from ib_insync import IB, Stock, Option, LimitOrder
@@ -39,12 +38,17 @@ MIN_VALID_BID_PRICE = 0.06          # Bid-Preise UNTER diesem Wert gelten als zu
 # wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
 
 
+def is_weekend():
+    """Samstag = 5, Sonntag = 6 (Montag = 0). Keine Orders am Wochenende."""
+    return datetime.date.today().weekday() >= 5
+
+
 def log_cron_event(details):
     """
     Schreibt eine Zeile mit Zeitstempel in cron.log. Wird sowohl beim reinen
     Skriptstart (log_cron_run) als auch bei bestimmten Abbruch-Ereignissen
-    (z.B. zu niedriger Bid-Preis) genutzt, damit im Cron-Log nachvollziehbar
-    ist, WARUM ein Lauf keine Order platziert hat.
+    (z.B. zu niedriger Bid-Preis, Wochenende) genutzt, damit im Cron-Log
+    nachvollziehbar ist, WARUM ein Lauf keine Order platziert hat.
     """
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(CRON_LOG_FILE, "a") as f:
@@ -52,8 +56,14 @@ def log_cron_event(details):
 
 
 def log_cron_run():
-    """Schreibt bei JEDEM Skriptstart sofort einen Eintrag in cron.log."""
-    log_cron_event("Bot-Lauf gestartet")
+    """
+    Schreibt bei JEDEM Skriptstart sofort einen Eintrag in cron.log - inklusive
+    Kennzeichnung, ob es sich um einen automatischen Cron-Lauf oder einen
+    manuellen Start im Terminal handelt. Erkennung ueber sys.stdin.isatty():
+    Cron-Jobs haben kein TTY, ein manueller Start im Terminal schon.
+    """
+    lauf_typ = "manueller Lauf" if sys.stdin.isatty() else "Cron-Lauf"
+    log_cron_event("Bot-Lauf gestartet (" + lauf_typ + ")")
 
 
 def log_ib_error(reqId, errorCode, errorString, contract):
@@ -317,6 +327,11 @@ def find_valid_put_contract(ib, symbol, currency, chain, calculated_target, min_
 
 def run_bot():
     log_cron_run()
+
+    if is_weekend():
+        print("[INFO] Heute ist Wochenende - keine Orders werden aufgegeben.")
+        log_cron_event("Kein Bot-Lauf: Wochenende (Samstag/Sonntag)")
+        return
 
     ib = IB()
     ib.errorEvent += log_ib_error
