@@ -30,12 +30,31 @@ CLOSE_ORDER_WAIT_SECONDS = 20       # wie lange nach Order-Platzierung auf Fill 
 MAX_STRIKE_FALLBACKS = 5            # wie viele tiefere Strikes probiert werden, falls ein Strike ungueltig ist
 MIN_VALID_BID_PRICE = 0.06          # Bid-Preise UNTER diesem Wert gelten als zu niedrig/illiquide
 
+MONATE_KURZ = {
+    1: "Jan", 2: "Feb", 3: "Mär", 4: "Apr", 5: "Mai", 6: "Jun",
+    7: "Jul", 8: "Aug", 9: "Sep", 10: "Okt", 11: "Nov", 12: "Dez"
+}
+
 # Hinweis: IB Gateway liefert ueber reqExecutions() ausschliesslich Ausfuehrungen
 # des aktuellen Handelstages - eine 3-Monats-Rueckschau ist darueber technisch
 # nicht moeglich (feste API-Beschraenkung, keine Frage der Konfiguration).
 # Stattdessen wird ib.positions() genutzt: das zeigt den tatsaechlichen, aktuellen
 # Kontostand direkt vom Broker, unabhaengig davon, wann eine Position eroeffnet
 # wurde - deckt damit jeden beliebigen Zeitraum ab, auch mehrere Monate zurueck.
+
+
+def format_expiry(expiry_str):
+    """
+    Wandelt ein IB-Verfallsdatum im Format 'YYYYMMDD' (z.B. '20261009') in das
+    Anzeigeformat 'YYYY-Mon-DD' mit deutschem 3-Buchstaben-Monat um
+    (z.B. '2026-Okt-09'). Wird NUR fuer Terminal-/Log-Ausgaben genutzt - die
+    IB-API selbst braucht weiterhin das rohe 'YYYYMMDD'-Format.
+    """
+    try:
+        d = datetime.datetime.strptime(expiry_str, '%Y%m%d').date()
+        return str(d.year) + "-" + MONATE_KURZ[d.month] + "-" + format(d.day, '02d')
+    except (ValueError, TypeError):
+        return expiry_str
 
 
 def is_weekend():
@@ -315,11 +334,11 @@ def find_valid_put_contract(ib, symbol, currency, chain, calculated_target, min_
             details = ib.reqContractDetails(probe)
             if details:
                 qualified_contract = details[0].contract
-                print("[INFO] Gueltiger Kontrakt gefunden: Strike " + str(strike) + " | Expiry " + expiry)
+                print("[INFO] Gueltiger Kontrakt gefunden: Strike " + str(strike) + " | Expiry " + format_expiry(expiry))
                 return qualified_contract, expiry, strike
             else:
                 print("[DEBUG] Kombination ungueltig (kein Kontrakt bei IB gelistet): Strike "
-                      + str(strike) + " | Expiry " + expiry)
+                      + str(strike) + " | Expiry " + format_expiry(expiry))
 
     print("[FEHLER] Keine gueltige Strike/Expiry-Kombination im Zeitfenster gefunden.")
     return None, None, None
@@ -416,7 +435,7 @@ def run_bot():
 
         if 0 < bid < MIN_VALID_BID_PRICE:
             print("[SICHERHEITSHINWEIS] Bid-Preis von " + format(bid, '.2f') + " USD ist zu niedrig (< " + format(MIN_VALID_BID_PRICE, '.2f') + " USD) - Order wird nicht platziert.")
-            log_cron_event("Order NICHT platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + expiry
+            log_cron_event("Order NICHT platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + format_expiry(expiry)
                             + " - Bid-Preis zu niedrig: " + format(bid, '.2f') + " USD (< " + format(MIN_VALID_BID_PRICE, '.2f') + " USD)")
             return
 
@@ -437,7 +456,7 @@ def run_bot():
         print("--- ZUSAMMENFASSUNG ---")
         print("ETF: iShares MSCI Emerging Markets (" + SYMBOL + ") | Letzter Kurs: " + format(last_close, '.2f') + " USD")
         print("Berechneter Zielpreis: " + format(calculated_target, '.2f') + " USD")
-        print("Gewaehlter Strike: " + str(target_strike) + " USD | Verfallsdatum: " + expiry)
+        print("Gewaehlter Strike: " + str(target_strike) + " USD | Verfallsdatum: " + format_expiry(expiry))
         print("Option: " + put_option.localSymbol + " (" + put_option.exchange + ")")
         print("Aktive Trades vor dieser Order: " + str(active_count) + "/" + str(MAX_CONCURRENT_TRADES))
 
@@ -465,7 +484,7 @@ def run_bot():
 
             ib.sleep(2)
             print("[OK] Status: " + trade.orderStatus.status)
-            log_trade("Order platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + expiry + " Limit " + format(target_price, '.2f') + " USD | Status: " + trade.orderStatus.status)
+            log_trade("Order platziert: " + SYMBOL + " Strike " + str(target_strike) + " Expiry " + format_expiry(expiry) + " Limit " + format(target_price, '.2f') + " USD | Status: " + trade.orderStatus.status)
 
             # Kurz warten, ob die Short-Put-Order noch im selben Lauf gefuellt wird.
             # Falls ja: sofort die Take-Profit-Rueckkauf-Order (50% Praemie, GTC) platzieren.
