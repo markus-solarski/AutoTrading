@@ -185,3 +185,67 @@ def place_short_put_with_tp(ib, contract, bid_price):
     """
     Platziert den Short-Put zum aktuellen Bid-Limit und setzt nach erfolgreicher
     Ausfuehrung automatisch eine Rueckkauf-Order zum 50%-Take-Profit.
+    """
+    limit_price = round(bid_price, 2)
+    sell_order = LimitOrder("SELL", 1, limit_price)
+    trade = ib.placeOrder(contract, sell_order)
+
+    elapsed = 0
+    while not trade.isDone() and elapsed < CLOSE_ORDER_WAIT_SECONDS:
+        ib.sleep(1)
+        elapsed += 1
+
+    if not trade.isDone():
+        ib.cancelOrder(sell_order)
+        ib.sleep(1)
+        log_cron_event(f"Order nicht innerhalb von {CLOSE_ORDER_WAIT_SECONDS}s ausgefuehrt. Storniert.")
+        return False
+
+    fill_price = trade.orderStatus.avgFillPrice
+    now_str = datetime.datetime.now(BOT_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    formatted_exp = format_expiry(contract.lastTradeDateOrContractMonth)
+
+    with open(LOG_FILE, "a") as f:
+        f.write(
+            f"[{now_str}] ORDER_PLACED {contract.localSymbol} "
+            f"Expiry: {formatted_exp} Strike: {contract.strike} Fill: {fill_price}\n"
+        )
+
+    log_cron_event(f"Ausgefuehrt: Short Put {contract.localSymbol} zu {fill_price:.2f} USD")
+
+    tp_price = round(fill_price * TAKE_PROFIT_FRACTION, 2)
+    tp_order = LimitOrder("BUY", 1, tp_price)
+    ib.placeOrder(contract, tp_order)
+    log_cron_event(f"Take-Profit platziert: Limit Buy {contract.localSymbol} zu {tp_price:.2f} USD")
+    return True
+
+
+def main():
+    log_cron_run()
+
+    ib = IB()
+    try:
+        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=15)
+        log_cron_event(f"Mit IB verbunden (Host: {IB_HOST}, Port: {IB_PORT}, ClientID: {IB_CLIENT_ID})")
+
+        if not can_open_new_trade(ib):
+            return
+
+        contract, bid_price = select_target_contract(ib)
+        if not contract or not bid_price:
+            return
+
+        place_short_put_with_tp(ib, contract, bid_price)
+
+    except ConnectionRefusedError:
+        log_cron_event("Verbindungsfehler: TWS oder IB Gateway laeuft nicht oder Port ist blockiert.")
+    except Exception as e:
+        log_cron_event(f"Unerwarteter Fehler: {str(e)}")
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+            log_cron_event("Verbindung zu IB getrennt.")
+
+
+if __name__ == "__main__":
+    main()
