@@ -18,7 +18,7 @@ except AttributeError:
 
 from ib_insync import IB, Stock, Option, LimitOrder
 
-MAX_ORDERS_PER_MONTH = 10
+MAX_ORDERS_PER_MONTH = 19
 MAX_CONCURRENT_TRADES = 3
 LOG_FILE = "trades_log.txt"
 SYMBOL = "EEM"
@@ -343,11 +343,13 @@ def find_valid_put_contract(ib, symbol, currency, chain, calculated_target, min_
 
 
 def run_bot():
+    start_ts = datetime.datetime.now()
     ib = IB()
     ib.errorEvent += log_ib_error
     try:
         print("=== SHORT PUT BOT: EMERGING MARKETS ETF (" + SYMBOL + ") ===")
-        log_trade("Bot-Lauf gestartet | Modus: " + RUN_MODE + " | PID " + str(os.getpid()))
+        log_trade("Bot-Lauf gestartet | Modus: " + RUN_MODE + " | PID " + str(os.getpid())
+                  + " | Startzeit: " + start_ts.strftime("%Y-%m-%d %H:%M:%S") + " (Europe/Berlin)")
 
         if already_traded_this_month():
             return
@@ -516,6 +518,12 @@ def run_bot():
         if ib.isConnected():
             ib.disconnect()
             print("Verbindung getrennt.")
+        end_ts = datetime.datetime.now()
+        dauer = (end_ts - start_ts).total_seconds()
+        try:
+            log_trade("Bot-Lauf beendet | Modus: " + RUN_MODE + " | Dauer: " + format(dauer, '.1f') + " s")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
