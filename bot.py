@@ -12,7 +12,7 @@ except AttributeError:
 
 from ib_insync import IB, Stock, Option, LimitOrder
 
-MAX_ORDERS_PER_MONTH = 10
+MAX_ORDERS_PER_MONTH = 18
 MAX_CONCURRENT_TRADES = 3
 LOG_FILE = "trades_log.txt"
 SYMBOL = "EEM"
